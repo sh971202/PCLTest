@@ -222,7 +222,7 @@ int main(int argc, char *argv[])
 	pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr wall_cloud(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
 
 	t = clock();
-	pcl::io::loadPLYFile("./CSIE6/123_class.ply", *cloud_color);
+	pcl::io::loadPLYFile("./lab2/123_class.ply", *cloud_color);
 
 	cout << "Load point cloud done!!" << " Time : " << float((clock() - t)) / CLOCKS_PER_SEC << " s" << endl;
 

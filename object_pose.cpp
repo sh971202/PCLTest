@@ -1,303 +1,338 @@
-#include <limits>
+#include <iostream>
 #include <fstream>
-#include <vector>
-#include <Eigen/Core>
-#include <pcl/pcl_macros.h>
+#include <string>
+#include <time.h>
+
+#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/io/io.h>
+#include <pcl/io/ply_io.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/io/obj_io.h>
+#include <pcl/PolygonMesh.h>
+#include <pcl/ModelCoefficients.h>
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
-#include <pcl/io/pcd_io.h>
-#include <pcl/io/ply_io.h>
-#include <pcl/kdtree/kdtree_flann.h>
-#include <pcl/filters/passthrough.h>
+
+#include <pcl/common/pca.h>
+#include <pcl/common/transforms.h>
+#include <pcl/common/common.h>
+#include <pcl/common/transformation_from_correspondences.h>
+#include <pcl/common/centroid.h>
+
+#include <pcl/filters/project_inliers.h>
+#include <pcl/filters/extract_indices.h>
 #include <pcl/filters/voxel_grid.h>
-#include <pcl/features/normal_3d.h>
-#include <pcl/features/fpfh.h>
-#include <pcl/registration/ia_ransac.h>
 
-pcl::PLYReader Reader;
+#include <pcl/keypoints/harris_3d.h>
+#include <pcl/features/esf.h>
+#include<pcl/features/principal_curvatures.h>
+#include <pcl/features/fpfh_omp.h>
 
-class FeatureCloud
+#include "pre_processing.h"
+#include "registration.h"
+
+#include <vtkAutoInit.h>
+VTK_MODULE_INIT(vtkInteractionStyle);
+VTK_MODULE_INIT(vtkRenderingFreeType);
+VTK_MODULE_INIT(vtkRenderingOpenGL);
+
+using namespace std;
+
+pre_processing process;
+registration reg;
+
+bool next_iteration = false;
+
+
+void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event, void* nothing)
 {
-public:
-	// A bit of shorthand
-	typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
-	typedef pcl::PointCloud<pcl::Normal> SurfaceNormals;
-	typedef pcl::PointCloud<pcl::FPFHSignature33> LocalFeatures;
-	typedef pcl::search::KdTree<pcl::PointXYZ> SearchMethod;
+	if (event.getKeySym() == "space" && event.keyDown())
+		next_iteration = true;
+}
 
-	FeatureCloud() :
-		search_method_xyz_(new SearchMethod),
-		normal_radius_(0.02f),
-		feature_radius_(0.02f)
-	{}
-
-	~FeatureCloud() {}
-
-	// Process the given cloud
-	void
-		setInputCloud(PointCloud::Ptr xyz)
-	{
-		xyz_ = xyz;
-		processInput();
-	}
-
-	// Load and process the cloud in the given PCD file
-	void
-		loadInputCloud(const std::string &pcd_file)
-	{
-		xyz_ = PointCloud::Ptr(new PointCloud);
-		Reader.read(pcd_file, *xyz_);
-		//pcl::io::loadPLYFile(pcd_file, *xyz_);
-		processInput();
-	}
-
-	// Get a pointer to the cloud 3D points
-	PointCloud::Ptr
-		getPointCloud() const
-	{
-		return (xyz_);
-	}
-
-	// Get a pointer to the cloud of 3D surface normals
-	SurfaceNormals::Ptr
-		getSurfaceNormals() const
-	{
-		return (normals_);
-	}
-
-	// Get a pointer to the cloud of feature descriptors
-	LocalFeatures::Ptr
-		getLocalFeatures() const
-	{
-		return (features_);
-	}
-
-protected:
-	// Compute the surface normals and local features
-	void
-		processInput()
-	{
-		computeSurfaceNormals();
-		computeLocalFeatures();
-	}
-
-	// Compute the surface normals
-	void
-		computeSurfaceNormals()
-	{
-		normals_ = SurfaceNormals::Ptr(new SurfaceNormals);
-
-		pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> norm_est;
-		norm_est.setInputCloud(xyz_);
-		norm_est.setSearchMethod(search_method_xyz_);
-		norm_est.setRadiusSearch(normal_radius_);
-		norm_est.compute(*normals_);
-	}
-
-	// Compute the local feature descriptors
-	void
-		computeLocalFeatures()
-	{
-		features_ = LocalFeatures::Ptr(new LocalFeatures);
-
-		pcl::FPFHEstimation<pcl::PointXYZ, pcl::Normal, pcl::FPFHSignature33> fpfh_est;
-		fpfh_est.setInputCloud(xyz_);
-		fpfh_est.setInputNormals(normals_);
-		fpfh_est.setSearchMethod(search_method_xyz_);
-		fpfh_est.setRadiusSearch(feature_radius_);
-		fpfh_est.compute(*features_);
-	}
-
-private:
-	// Point cloud data
-	PointCloud::Ptr xyz_;
-	SurfaceNormals::Ptr normals_;
-	LocalFeatures::Ptr features_;
-	SearchMethod::Ptr search_method_xyz_;
-
-	// Parameters
-	float normal_radius_;
-	float feature_radius_;
-};
-
-class TemplateAlignment
+void viewerOneOff(pcl::visualization::PCLVisualizer& viewer)
 {
-public:
+	viewer.setBackgroundColor(255, 255, 255);
+}
 
-	// A struct for storing alignment results
-	struct Result
+pcl::PointCloud<pcl::PointXYZ>::Ptr Harris3D_key_point(pcl::visualization::PCLVisualizer& viewer, pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr cloud, vector<Plane> object_planes, string id)
+{
+	pcl::PointCloud<pcl::PointXYZ>::Ptr tempc_loud(new pcl::PointCloud<pcl::PointXYZ>);
+	pcl::PointCloud<pcl::Normal>::Ptr normal(new pcl::PointCloud<pcl::Normal>);
+
+	pcl::copyPointCloud(*cloud, *tempc_loud); //copy original cloud
+	pcl::copyPointCloud(*cloud, *normal); //copy original cloud normal
+
+	pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_out(new pcl::PointCloud<pcl::PointXYZI>);
+
+	pcl::HarrisKeypoint3D<pcl::PointXYZ, pcl::PointXYZI, pcl::Normal> harris;
+	pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+	pcl::PointIndicesConstPtr key_point;
+	clock_t t;
+	t = clock();
+	cout << "Key Point extract start!!" << endl;
+	harris.setInputCloud(tempc_loud);
+	harris.setNormals(normal);
+	//harris.setSearchMethod(tree);
+	harris.setNonMaxSupression(true);
+	harris.setRadius(0.08f);
+	//harris.setRadiusSearch(0.0f);
+	//harris.setKSearch(50);
+	//harris.setRefine(false);
+	//harris.setNumberOfThreads(4);
+	harris.setThreshold(0.002f);
+	harris.compute(*cloud_out);
+	key_point = harris.getKeypointsIndices();
+
+	cout << "ksize: " << key_point->indices.size() << endl;
+
+	pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_harris(new pcl::PointCloud<pcl::PointXYZ>);
+
+	pcl::PointXYZ point;
+	for (int i = 0; i < cloud_out->size(); i++)
 	{
-		float fitness_score;
-		Eigen::Matrix4f final_transformation;
-		EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-	};
+		point.x = cloud_out->at(i).x;
+		point.y = cloud_out->at(i).y;
+		point.z = cloud_out->at(i).z;
+		//cout << "I: " << cloud_out->points[i].intensity << endl;
 
-	TemplateAlignment() :
-		min_sample_distance_(0.05f),
-		max_correspondence_distance_(0.01f*0.01f),
-		nr_iterations_(500)
-	{
-		// Initialize the parameters in the Sample Consensus Initial Alignment (SAC-IA) algorithm
-		sac_ia_.setMinSampleDistance(min_sample_distance_);
-		sac_ia_.setMaxCorrespondenceDistance(max_correspondence_distance_);
-		sac_ia_.setMaximumIterations(nr_iterations_);
-	}
-
-	~TemplateAlignment() {}
-
-	// Set the given cloud as the target to which the templates will be aligned
-	void
-		setTargetCloud(FeatureCloud &target_cloud)
-	{
-		target_ = target_cloud;
-		sac_ia_.setInputTarget(target_cloud.getPointCloud());
-		sac_ia_.setTargetFeatures(target_cloud.getLocalFeatures());
-	}
-
-	// Add the given cloud to the list of template clouds
-	void
-		addTemplateCloud(FeatureCloud &template_cloud)
-	{
-		templates_.push_back(template_cloud);
-	}
-
-	// Align the given template cloud to the target specified by setTargetCloud ()
-	void
-		align(FeatureCloud &template_cloud, TemplateAlignment::Result &result)
-	{
-		sac_ia_.setInputCloud(template_cloud.getPointCloud());
-		sac_ia_.setSourceFeatures(template_cloud.getLocalFeatures());
-
-		pcl::PointCloud<pcl::PointXYZ> registration_output;
-		sac_ia_.align(registration_output);
-
-		result.fitness_score = (float)sac_ia_.getFitnessScore(max_correspondence_distance_);
-		result.final_transformation = sac_ia_.getFinalTransformation();
-	}
-
-	// Align all of template clouds set by addTemplateCloud to the target specified by setTargetCloud ()
-	void
-		alignAll(std::vector<TemplateAlignment::Result, Eigen::aligned_allocator<Result> > &results)
-	{
-		results.resize(templates_.size());
-		for (std::size_t i = 0; i < templates_.size(); ++i)
+		int op = 0;
+		for (int j = 0; j < cloud_harris->size(); j++)
 		{
-			align(templates_[i], results[i]);
-		}
-	}
-
-	// Align all of template clouds to the target cloud to find the one with best alignment score
-	int
-		findBestAlignment(TemplateAlignment::Result &result)
-	{
-		// Align all of the templates to the target cloud
-		std::vector<Result, Eigen::aligned_allocator<Result> > results;
-		alignAll(results);
-
-		// Find the template with the best (lowest) fitness score
-		float lowest_score = std::numeric_limits<float>::infinity();
-		int best_template = 0;
-		for (std::size_t i = 0; i < results.size(); ++i)
-		{
-			const Result &r = results[i];
-			if (r.fitness_score < lowest_score)
+			double dis = sqrt(pow(point.x - cloud_harris->points[j].x, 2) + pow(point.y - cloud_harris->points[j].y, 2) + pow(point.z - cloud_harris->points[j].z, 2));
+			if (dis < 0.05)
 			{
-				lowest_score = r.fitness_score;
-				best_template = (int)i;
+				op = 1;
+				break;
 			}
 		}
+		if (op == 0)
+		{
+			cloud_harris->push_back(point);
+		}
 
-		// Output the best alignment
-		result = results[best_template];
-		return (best_template);
 	}
 
-private:
-	// A list of template clouds and the target to which they will be aligned
-	std::vector<FeatureCloud> templates_;
-	FeatureCloud target_;
+	cout << cloud_harris->size() << endl;
 
-	// The Sample Consensus Initial Alignment (SAC-IA) registration routine and its parameters
-	pcl::SampleConsensusInitialAlignment<pcl::PointXYZ, pcl::PointXYZ, pcl::FPFHSignature33> sac_ia_;
-	float min_sample_distance_;
-	float max_correspondence_distance_;
-	int nr_iterations_;
-};
+	//---------PCA filter--------
 
-// Align a collection of object templates to a sample point cloud
-int
-main(int argc, char **argv)
-{
-	if (argc < 3)
+	int count = 0;
+
+	for (pcl::PointCloud<pcl::PointXYZ>::iterator K = cloud_harris->begin(); K != cloud_harris->end();)
 	{
-		printf("No target PCD file given!\n");
-		return (-1);
+		pcl::PointCloud<pcl::PointXYZ>::Ptr temp(new pcl::PointCloud<pcl::PointXYZ>);
+		pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
+		vector<int> pointIdxRadiusSearch;
+		vector<float> pointRadiusSquaredDistance;
+
+		kdtree.setInputCloud(tempc_loud);
+
+		if (kdtree.radiusSearch(*K, 0.15f, pointIdxRadiusSearch, pointRadiusSquaredDistance))  // Euclidean Distance < 0.15m is neighborhood. (Radius)
+		{
+			if (pointIdxRadiusSearch.size() < 10)
+			{
+				K = cloud_harris->erase(K);
+				continue;
+			}
+
+			for (int j = 0; j < pointIdxRadiusSearch.size(); j++)
+			{
+				temp->push_back(tempc_loud->points[pointIdxRadiusSearch[j]]);
+			}
+			Eigen::Vector4f pcaCentroid;
+
+			pcl::compute3DCentroid(*temp, pcaCentroid);
+			Eigen::Matrix3f covariance;
+			pcl::computeCovarianceMatrixNormalized(*temp, pcaCentroid, covariance);
+			//pcl::computeCovarianceMatrixNormalized(*normal, Eigen::Vector4f(0, 0, 0, 0), covariance);
+			Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> eigen_solver(covariance, Eigen::ComputeEigenvectors);
+			Eigen::Matrix3f eigenVectorsPCA = eigen_solver.eigenvectors();
+			Eigen::Vector3f eigenValuesPCA = eigen_solver.eigenvalues();
+			//Eigen::Matrix3f eigenVectorsPCA = pca_copy.getEigenVectors();
+			//Eigen::Vector3f eigenValuesPCA = pca_copy.getEigenValues();
+
+			cout << "PCA: " << eigenValuesPCA[0] << " " << eigenValuesPCA[1] << " " << eigenValuesPCA[2] << endl;
+
+			float L1 = eigenValuesPCA[0];
+			float L2 = eigenValuesPCA[1];
+			float L3 = eigenValuesPCA[2];
+
+			float RATIO = (L1 * L2) / (L3*(L1 + L2) + L2 * L2);
+
+			cout << "RATIO: " << RATIO << endl;
+
+			pcl::PointCloud<pcl::PointXYZ>::Ptr temp_pca(new pcl::PointCloud<pcl::PointXYZ>);
+
+			temp_pca->points.push_back(*K);
+
+			if (RATIO > 0.04)
+			{
+				K++;
+
+				//pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> harris_color_handler_s(temp_pca, 0, 255, 0);
+				//viewer.addPointCloud(temp_pca, harris_color_handler_s, "harris_scene" + to_string(count) + "ID" + id);
+				//viewer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "harris_scene" + to_string(count) + "ID" + id);
+			}
+			else
+			{
+				K = cloud_harris->erase(K);
+
+				//pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> harris_color_handler_s(temp_pca, 255, 0, 0);
+				//viewer.addPointCloud(temp_pca, harris_color_handler_s, "harris_scene" + to_string(count) + "ID" + id);
+				//viewer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "harris_scene" + to_string(count) + "ID" + id);
+			}
+			count++;
+		}
+		else
+		{
+			K = cloud_harris->erase(K);
+			continue;
+		}
 	}
 
-	// Load the object templates specified in the object_templates.txt file
-	std::vector<FeatureCloud> object_templates;
-	FeatureCloud template_cloud;
-	template_cloud.loadInputCloud(argv[1]);
-//	object_templates.push_back(template_cloud);
+	//pcl::PointCloud<pcl::PointXYZ>::Ptr temp_pca(new pcl::PointCloud<pcl::PointXYZ>);
+
+	//temp_pca->points.push_back(cloud_harris->points[0]);
+
+	//pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> harris_color_handler_s(temp_pca, 0, 255, 0);
+	//viewer.addPointCloud(temp_pca, harris_color_handler_s, "harris_scene" + to_string(count) + "ID" + id);
+	//viewer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "harris_scene" + to_string(count) + "ID" + id);
+	//---------PCA filter--------
+
+
+	/*
+	for (int i = 0; i < cloud_harris->size(); i++)
+	{
+	cout << cloud_harris->points[i].y << endl;
+	}
+	*/
+	cout << " Time : " << float((clock() - t)) / CLOCKS_PER_SEC << " s" << endl;
+
+	/*
+	for (int i = 0; i < cloud_harris->size(); i++)
+	{
+	viewer.addSphere(cloud_harris->points[i], 0.15, "S" + to_string(i)+id);
+	}
+	*/
+
+	//pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> harris_color_handler(cloud_harris, 255, 0, 0);
+	//viewer.addPointCloud(cloud_harris, harris_color_handler, "harris" + id);
+	//viewer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "harris" + id);
+
+	cout << "After PCAfilter: " << cloud_harris->size() << endl;
+
+	return cloud_harris;
+}
+
+vector<pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr> Kdescriptor(pcl::visualization::PCLVisualizer& viewer, pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr cloud, pcl::PointCloud<pcl::PointXYZ>::Ptr Keypoint, string id)
+{
+	pcl::PointCloud<pcl::PointXYZ>::Ptr tempc_loud(new pcl::PointCloud<pcl::PointXYZ>);
+
+	pcl::copyPointCloud(*cloud, *tempc_loud); //copy original cloud
+
+	pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
+	vector<int> pointIdxRadiusSearch;
+	vector<float> pointRadiusSquaredDistance;
+
+	vector<int> pointIdxNKNSearch(50);
+	vector<float> pointNKNSquaredDistance(50);
+
+
+	vector<pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr> descriptors;
+
+	kdtree.setInputCloud(tempc_loud);
+
+	for (int i = 0; i < Keypoint->size(); i++)
+	{
+		/*
+		if (kdtree.nearestKSearch(Keypoint->points[i],50, pointIdxNKNSearch, pointNKNSquaredDistance))  // Top 50 minimum Euclidean Distance (Knearst)
+		{
+		//cout << pointIdxRadiusSearch.size() << endl;
+		pcl::PointCloud<pcl::PointXYZ>::Ptr temp(new pcl::PointCloud<pcl::PointXYZ>);
+
+		for (int j = 0; j < pointIdxNKNSearch.size(); j++)
+		{
+		temp->push_back(cloud->points[pointIdxNKNSearch[j]]);
+		}
+
+		descriptors.push_back(temp);
+
+		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> temp_color_handler(temp, 0, 255, 0);
+		viewer.addPointCloud(temp, temp_color_handler, "kdescriptor" + to_string(i) + id);
+		}
+		*/
+
+		if (kdtree.radiusSearch(Keypoint->points[i], 0.15f, pointIdxRadiusSearch, pointRadiusSquaredDistance))  // Euclidean Distance < 0.15m is neighborhood. (Radius)
+		{
+			//cout << pointIdxRadiusSearch.size() << endl;
+			pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr temp(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
+
+			for (int j = 0; j < pointIdxRadiusSearch.size(); j++)
+			{
+				temp->push_back(cloud->points[pointIdxRadiusSearch[j]]);
+			}
+
+			descriptors.push_back(temp);
+
+			//pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> temp_color_handler(temp, 0, 255, 0);
+			//viewer.addPointCloud(temp, temp_color_handler, "kdescriptor" + to_string(i) + id);
+			//viewer.setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "kdescriptor" + to_string(i) + id);
+			//viewer.addPointCloudNormals<pcl::PointXYZRGBNormal>(temp, 1, 0.02, "normal" + to_string(i) + id);
+		}
+
+	}
+	//cout << "i:" <<descriptors.size()<< endl;
+	return descriptors;
+}
+
+// Align a rigid object to a scene with clutter and occlusions
+int main(int argc, char **argv)
+{
+	// Point clouds
+	pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr object(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
+	pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr scene(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
+	
+	pcl::io::loadPLYFile<pcl::PointXYZRGBNormal>("./pc1.ply", *object);
+	pcl::io::loadPLYFile<pcl::PointXYZRGBNormal>("./cloud-1.ply", *scene);
 	
 
-	// Load the target cloud PCD file
-	pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
-	Reader.read(argv[2], *cloud);
-	//pcl::io::loadPLYFile(argv[2], *cloud);
+	// Downsample
+	pcl::console::print_highlight("Downsampling...\n");
+	pcl::VoxelGrid<pcl::PointXYZRGBNormal> grid;
+	const float leaf = 0.005f;
+	grid.setLeafSize(leaf, leaf, leaf);
+	grid.setInputCloud(object);
+	grid.filter(*object);
+	grid.setInputCloud(scene);
+	grid.filter(*scene);
 
-	// Preprocess the cloud by...
-	// ...removing distant points
-	const float depth_limit = 1.0;
-	pcl::PassThrough<pcl::PointXYZ> pass;
-	pass.setInputCloud(cloud);
-	pass.setFilterFieldName("z");
-	pass.setFilterLimits(0, depth_limit);
-	pass.filter(*cloud);
+	int count = 0;
+	pcl::visualization::PCLVisualizer viewer("Cloud Viewer");
+	viewer.registerKeyboardCallback(&keyboardEventOccurred, (void*)NULL); //add keyboard event
+																		  //viewer.addCoordinateSystem(0.3, "coordinate", 0);
+	viewer.initCameraParameters();
+	//This will only get called once
+	viewerOneOff(viewer);
 
-	// ... and downsampling the point cloud
-	const float voxel_grid_size = 0.005f;
-	pcl::VoxelGrid<pcl::PointXYZ> vox_grid;
-	vox_grid.setInputCloud(cloud);
-	vox_grid.setLeafSize(voxel_grid_size, voxel_grid_size, voxel_grid_size);
-	//vox_grid.filter (*cloud); 
-	pcl::PointCloud<pcl::PointXYZ>::Ptr tempCloud(new pcl::PointCloud<pcl::PointXYZ>);
-	vox_grid.filter(*tempCloud);
-	cloud = tempCloud;
+	vector<Plane> object_plane;
+	reg.find_object_plane(viewer, object, to_string(count), object_plane, 0.02, 0.1);
 
-	// Assign to the target FeatureCloud
-	FeatureCloud target_cloud;
-	target_cloud.setInputCloud(cloud);
+	for (int i = 0; i < object_plane.size(); i++)
+	{
+		float angle = acos(Eigen::Vector3f::UnitY().dot(object_plane[i].normal));
 
-	// Set the TemplateAlignment inputs
-	TemplateAlignment template_align;
-	template_align.addTemplateCloud(template_cloud);
-	template_align.setTargetCloud(target_cloud);
+		if (angle * 180 / M_PI > 90.0)
+			object_plane[i].normal = object_plane[i].normal * -1;
+	}
 
-	// Find the best template alignment
-	TemplateAlignment::Result best_alignment;
-	int best_index = template_align.findBestAlignment(best_alignment);
-	const FeatureCloud &best_template = object_templates[best_index];
+	
+	pcl::PointCloud<pcl::PointXYZ>::Ptr scene_keypoints(new pcl::PointCloud<pcl::PointXYZ>);
+	vector<pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr> scene_descriptors;
+	scene_keypoints = Harris3D_key_point(viewer, scene, object_plane, to_string(count));
+	scene_descriptors = Kdescriptor(viewer, scene, scene_keypoints, to_string(count));
+	PCA_visualize(viewer, scene_descriptors, scene_keypoints, to_string(count));
 
-	// Print the alignment fitness score (values less than 0.00002 are good)
-	printf("Best fitness score: %f\n", best_alignment.fitness_score);
-
-	// Print the rotation matrix and translation vector
-	Eigen::Matrix3f rotation = best_alignment.final_transformation.block<3, 3>(0, 0);
-	Eigen::Vector3f translation = best_alignment.final_transformation.block<3, 1>(0, 3);
-
-	printf("\n");
-	printf("    | %6.3f %6.3f %6.3f | \n", rotation(0, 0), rotation(0, 1), rotation(0, 2));
-	printf("R = | %6.3f %6.3f %6.3f | \n", rotation(1, 0), rotation(1, 1), rotation(1, 2));
-	printf("    | %6.3f %6.3f %6.3f | \n", rotation(2, 0), rotation(2, 1), rotation(2, 2));
-	printf("\n");
-	printf("t = < %0.3f, %0.3f, %0.3f >\n", translation(0), translation(1), translation(2));
-
-	// Save the aligned template for visualization
-	pcl::PointCloud<pcl::PointXYZ> transformed_cloud;
-	pcl::transformPointCloud(*best_template.getPointCloud(), transformed_cloud, best_alignment.final_transformation);
-	pcl::io::savePCDFileBinary("output.pcd", transformed_cloud);
-
-	return (0);
 	system("pause");
+	return (0);
 }

@@ -159,8 +159,8 @@ int main(int argc, char **argv)
 	//pcl::PointCloud<pcl::PointXYZ>::Ptr template_cloud(new pcl::PointCloud<pcl::PointXYZ>);
 	pcl::PointCloud<pcl::PointXYZ>::Ptr target_cloud(new pcl::PointCloud<pcl::PointXYZ>);
 	FeatureCloud template_cloud;
-	template_cloud.loadInputCloud(argv[1]);
-	Reader.read(argv[2], *target_cloud);
+	template_cloud.loadInputCloud("./cloud-1.ply");
+	Reader.read("./pc1.ply", *target_cloud);
 
 	pcl::console::print_highlight("removing distant points...\n");
 	const float depth_limit = 1.0;

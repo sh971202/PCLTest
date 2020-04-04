@@ -35,13 +35,38 @@ int main(int argc, char **argv)
 	
 	pcl::io::loadPLYFile<pcl::PointXYZRGBA>("./pc1.ply", *object);
 	pcl::io::loadPLYFile<pcl::PointXYZRGBA>("./cloud-1.ply", *scene);
-	pcl::io::loadPLYFile<pcl::PointXYZRGBA>("./cofusion/cofusion_data/box6/9/cloud-1.ply", *pose);
+	pcl::io::loadPLYFile<pcl::PointXYZRGBA>("./cofusion/cofusion_data/box6/8/cloud-1.ply", *pose);
 	pcl::io::loadPLYFile<pcl::PointXYZRGBNormal>("./pc1.ply", *icp_object);
 	pcl::io::loadPLYFile<pcl::PointXYZRGBNormal>("./cloud-1.ply", *icp_scene);
-	pcl::io::loadPLYFile<pcl::PointXYZRGBNormal>("./cofusion/cofusion_data/box6/9/cloud-1.ply", *icp_pose);
+	pcl::io::loadPLYFile<pcl::PointXYZRGBNormal>("./cofusion/cofusion_data/box6/8/cloud-1.ply", *icp_pose);
+	writer.write("./gasd_object.ply", *object);
+
+	Eigen::Matrix4f pc_trans;
+	pc_trans << 0.9069785475730896,
+		0.0,
+		0.0,
+		0.0,
+		0.0,
+		0.9069785475730896,
+		0.0,
+		0.0,
+		0.0,
+		0.0,
+		0.95213085412979126,
+		0.0,
+		-0.63535857200622559,
+		0.0,
+		1.1206178665161133,
+		1.0;
+	pcl::transformPointCloud(*object, *object, pc_trans);
+	pcl::transformPointCloud(*icp_object, *icp_object, pc_trans);
+	//writer.write("./gasd_object.ply", *object);
 
 	// Downsample
 	pcl::console::print_highlight("Downsampling...\n");
+
+	clock_t t;
+	t = clock();
 	pcl::VoxelGrid<pcl::PointXYZRGBA> grid;
 	const float leaf = 0.005f;
 	grid.setLeafSize(leaf, leaf, leaf);
@@ -52,6 +77,7 @@ int main(int argc, char **argv)
 	grid.setInputCloud(pose);
 	grid.filter(*pose);
 	
+	/*
 	pcl::VoxelGrid<pcl::PointXYZRGBNormal> icp_grid;
 	icp_grid.setLeafSize(leaf, leaf, leaf);
 	icp_grid.setInputCloud(icp_object);
@@ -60,6 +86,8 @@ int main(int argc, char **argv)
 	icp_grid.filter(*icp_scene);
 	icp_grid.setInputCloud(icp_pose);
 	icp_grid.filter(*icp_pose);
+	*/
+	cout << "Downsampling... done!!" << " Time : " << float((clock() - t)) / CLOCKS_PER_SEC << " s" << endl;
 	
 	// Estimate features
 	pcl::console::print_highlight("Estimating features...\n");
@@ -74,9 +102,9 @@ int main(int argc, char **argv)
 	Eigen::Matrix4f scene_trans = gasd.getTransform();
 	scene_trans = object_trans.inverse().eval() * scene_trans;
 	pcl::transformPointCloud(*icp_scene, *icp_scene, scene_trans);
-	writer.write("./gasd_scene.ply", *icp_scene);
-	writer.write("./gasd_object.ply", *icp_object);
-
+	pcl::transformPointCloud(*icp_pose, *icp_pose, scene_trans);
+	
+	pcl::console::print_highlight("ICP...\n");
 	pcl::IterativeClosestPointWithNormals<pcl::PointXYZRGBNormal, pcl::PointXYZRGBNormal> icp;
 	icp.setInputSource(icp_scene);
 	icp.setInputTarget(icp_object);
@@ -85,12 +113,15 @@ int main(int argc, char **argv)
 	icp.setEuclideanFitnessEpsilon(0.001);
 	icp.setMaximumIterations(100);
 	icp.align(*icp_scene);
+	//icp.align(*icp_pose);
 
 	if (icp.hasConverged())
 	{
 		// Print results
 		printf("\n");
 		Eigen::Matrix4f transformation = icp.getFinalTransformation();
+		//pcl::transformPointCloud(*icp_scene, *icp_scene, transformation);
+		pcl::transformPointCloud(*icp_pose, *icp_pose, transformation);
 		pcl::console::print_info("    | %6.3f %6.3f %6.3f | \n", transformation(0, 0), transformation(0, 1), transformation(0, 2));
 		pcl::console::print_info("R = | %6.3f %6.3f %6.3f | \n", transformation(1, 0), transformation(1, 1), transformation(1, 2));
 		pcl::console::print_info("    | %6.3f %6.3f %6.3f | \n", transformation(2, 0), transformation(2, 1), transformation(2, 2));
@@ -101,36 +132,43 @@ int main(int argc, char **argv)
 		pcl::visualization::PCLVisualizer visu("Alignment");
 		visu.addPointCloud(icp_scene, ColorHandlerT(icp_scene, 0.0, 255.0, 0.0), "scene");
 		visu.addPointCloud(icp_object, ColorHandlerT(icp_object, 0.0, 0.0, 255.0), "object_aligned");
+		visu.addPointCloud(icp_pose, ColorHandlerT(icp_pose, 0.0, 255.0, 255.0), "object_move");
+		writer.write("./gasd_scene.ply", *icp_scene);
+		writer.write("./gasd_object.ply", *icp_pose);
 		visu.spin();
 	}
 
+	/*
 	// Estimate features
 	pcl::console::print_highlight("Estimating features...\n");
 	gasd.setInputCloud(pose);
 	gasd.compute(descriptor);
-	Eigen::Matrix4f pose_trans = gasd.getTransform();
-	//pcl::transformPointCloud(*icp_object, *icp_object, object_trans);
-	gasd.setInputCloud(scene);
+	Eigen::Matrix4f pose_trans = gasd.getTransform(); 
+	gasd.setInputCloud(object);
 	gasd.compute(descriptor);
-	scene_trans = gasd.getTransform();
-	scene_trans = pose_trans.inverse().eval() * scene_trans;
-	pcl::transformPointCloud(*icp_scene, *icp_scene, scene_trans);
-	writer.write("./gasd_pose.ply", *icp_scene);
+	object_trans = gasd.getTransform();
+	//pcl::transformPointCloud(*icp_object, *icp_object, object_trans);
+	object_trans = pose_trans.inverse().eval();
+	pcl::transformPointCloud(*icp_object, *icp_object, object_trans);
+	writer.write("./gasd_pose.ply", *icp_object);
+	*/
 
-	
+	pcl::console::print_highlight("ICP...\n");
 	icp.setInputSource(icp_pose);
-	icp.setInputTarget(icp_scene);
+	icp.setInputTarget(icp_object);
 	icp.setMaxCorrespondenceDistance(100);
 	icp.setTransformationEpsilon(1e-10);
-	icp.setEuclideanFitnessEpsilon(0.001);
+	icp.setEuclideanFitnessEpsilon(1);
 	icp.setMaximumIterations(100);
-	icp.align(*icp_pose);
+	//icp.align(*icp_object);
 
 	if (icp.hasConverged())
 	{
 		// Print results
 		printf("\n");
 		Eigen::Matrix4f transformation = icp.getFinalTransformation();
+		transformation = transformation.inverse().eval();
+		pcl::transformPointCloud(*icp_object, *icp_object, transformation);
 		pcl::console::print_info("    | %6.3f %6.3f %6.3f | \n", transformation(0, 0), transformation(0, 1), transformation(0, 2));
 		pcl::console::print_info("R = | %6.3f %6.3f %6.3f | \n", transformation(1, 0), transformation(1, 1), transformation(1, 2));
 		pcl::console::print_info("    | %6.3f %6.3f %6.3f | \n", transformation(2, 0), transformation(2, 1), transformation(2, 2));
@@ -140,7 +178,8 @@ int main(int argc, char **argv)
 
 		pcl::visualization::PCLVisualizer visu("Alignment");
 		visu.addPointCloud(icp_scene, ColorHandlerT(icp_scene, 0.0, 255.0, 0.0), "scene");
-		visu.addPointCloud(icp_pose, ColorHandlerT(icp_pose, 0.0, 0.0, 255.0), "object_aligned");
+		visu.addPointCloud(icp_object, ColorHandlerT(icp_object, 0.0, 0.0, 255.0), "object_aligned");
+		visu.addPointCloud(icp_pose, ColorHandlerT(icp_pose, 0.0, 255.0, 255.0), "object_move");
 		visu.spin();
 	}
 
